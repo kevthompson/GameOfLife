@@ -1,4 +1,7 @@
 # Python code to implement Conway's Game Of Life
+import numba
+from numba import guvectorize, int64
+from numba import cuda
 import numpy as np
 import matplotlib.pyplot as plt 
 import matplotlib.animation as animation
@@ -7,9 +10,10 @@ import matplotlib.animation as animation
 ON = 1
 OFF = 0
 vals = [ON, OFF]
+I_W = 5
 
-testGrid = np.array([[1, 1, 0, 0, 0, 0],[1, 1, 0, 0, 0, 0],[0, 0, 0, 0, 0, 0],[0, 0, 0, 0, 0, 0],[0, 0, 0, 0, 0, 0],[0, 0, 0, 0, 0, 0]], np.int32)
-
+# testGrid = np.array([[1, 1, 0, 0, 0, 0],[1, 1, 0, 0, 0, 0],[0, 0, 0, 0, 0, 0],[0, 0, 0, 0, 0, 0],[0, 0, 0, 0, 0, 0],[0, 0, 0, 0, 0, 0]], np.int32)
+testGrid = np.zeros((I_W, I_W))
 class player:
     def __init__(self, gridWidth=30, initWidth=5):
         # set grid size
@@ -21,27 +25,28 @@ class player:
         # set animation update interval
         self.length = 50
         # self.setGrid(testGrid)
+        self.tempGrid = np.zeros((self.gridWidth, self.gridWidth)).astype(int)
         self.randomGrid()
 
         # average number of live tiles
         self.fitness = 0
 
     def setGrid(self, newGrid):
-        self.grid = np.zeros((self.gridWidth, self.gridWidth))
-        self.initGrid = newGrid
+        self.grid = np.zeros((self.gridWidth, self.gridWidth)).astype(int)
+        self.initGrid = newGrid.astype(int)
         self.grid[self.yStart:(self.yStart+self.initWidth)%self.gridWidth, self.xStart:(self.xStart+self.initWidth)%self.gridWidth] = self.initGrid
 
     def resetGrid(self):
-        self.grid = np.zeros((self.gridWidth, self.gridWidth))
+        self.grid = np.zeros((self.gridWidth, self.gridWidth)).astype(int)
         self.grid[self.yStart:(self.yStart+self.initWidth)%self.gridWidth, self.xStart:(self.xStart+self.initWidth)%self.gridWidth] = self.initGrid
 
     def randomGrid(self):
-        self.grid = np.zeros((self.gridWidth, self.gridWidth))
-        self.initGrid = np.random.choice(vals, self.initWidth*self.initWidth, p=[0.5, 0.5]).reshape(self.initWidth, self.initWidth)
+        self.grid = np.zeros((self.gridWidth, self.gridWidth)).astype(int)
+        self.initGrid = np.random.choice(vals, self.initWidth*self.initWidth, p=[0.5, 0.5]).reshape(self.initWidth, self.initWidth).astype(int)
         self.grid[self.yStart:(self.yStart+self.initWidth)%self.gridWidth, self.xStart:(self.xStart+self.initWidth)%self.gridWidth] = self.initGrid
 
 
-    def update(self, frameNum, img, ):
+    def update(self, frameNum, img, fig,):
         if frameNum == 0:
             self.fitness = 0
 
@@ -50,12 +55,12 @@ class player:
         img.set_data(self.grid)   
 
         if frameNum == self.length-1:
-            print(self.fitness)
-            self.setGrid(testGrid)
+            plt.close(fig)
+            # print(self.fitness)
+            # self.setGrid(testGrid)
         return img,
 
     def compute(self):
-        active = 0
         # copy grid since we require 8 neighbors 
         # for calculation and we go line by line 
         tempGrid = self.grid.copy()
@@ -84,7 +89,7 @@ class player:
         # set up animation
         fig, ax = plt.subplots()
         img = ax.imshow(self.grid, interpolation='nearest')
-        ani = animation.FuncAnimation(fig, self.update, fargs=(img,),
+        ani = animation.FuncAnimation(fig, self.update, fargs=(img, fig,),
                                       frames = self.length,
                                       interval=30,
                                       save_count=50)
@@ -93,7 +98,7 @@ class player:
     def run(self):
         for frameNum in range(self.length):
             self.compute()
-        print(self.fitness)
+        # print(self.fitness)
         self.setGrid(testGrid)
         self.fitness = 0
 
@@ -101,7 +106,6 @@ class player:
 class population:
     def __init__(self, size, grid, init):
         self.pool = [ player(grid, init) for x in range(size) ]
-        self.maxFitness = 0
         self.initWidth = init
         self.gridWidth = grid
         self.size = size
@@ -111,9 +115,16 @@ class population:
     def update(self, count=1):
         for ind in self.pool:
             for i in range(count):
-                ind.compute()
-            if ind.fitness > self.maxFitness:
-                self.maxFitness = ind.fitness                
+                ind.compute()              
+
+    def parallel_update(self, count=1):
+        for i in range(count):
+            for individual in self.pool:
+                parallel_compute(individual.grid, individual.gridWidth, individual.tempGrid)
+                individual.grid[:] = individual.tempGrid[:].astype(int)
+                individual.fitness += sum(sum(individual.grid))
+                # print(individual.grid, individual.fitness)
+                individual.tempGrid = np.ndarray((self.gridWidth, self.gridWidth))
 
     def reset(self):
         for ind in self.pool:
@@ -126,7 +137,7 @@ class population:
     def generateGrid(self, index1, index2):
         parent1 = self.pool[index1]
         parent2 = self.pool[index2]
-        childGrid = np.zeros((self.initWidth, self.initWidth))
+        childGrid = np.zeros((self.initWidth, self.initWidth)).astype(int)
         #Crossover
         for i in range(self.initWidth):
             splitPoint = np.random.randint(self.initWidth)
@@ -153,7 +164,7 @@ class population:
             if mutate > np.random.random():
                 x_modify = np.random.randint(0,ind.initWidth-2)+ind.xStart
                 y_modify = np.random.randint(0,ind.initWidth-2)+ind.yStart
-                ind.grid[x_modify:x_modify+2, y_modify:y_modify+2] = np.random.choice(vals, 4, p=[0.5, 0.5]).reshape(2, 2)
+                ind.grid[x_modify:x_modify+2, y_modify:y_modify+2] = np.random.choice(vals, 4, p=[0.5, 0.5]).reshape(2, 2).astype(int)
         
         parents_length = len(parents)
         desired_length = self.size - parents_length
@@ -175,29 +186,46 @@ class population:
         for individual in self.pool:
             f.write("%s,%d\n" %(individual.initGrid, individual.fitness))
 
+# Run GOL algorithm
+@guvectorize([(int64[:,:], int64, int64[:,:])], '(n,n),()->(n,n)')
+def parallel_compute(grid, width, tempGrid):
+
+    # compute 8-neghbor sum
+    # using toroidal boundary conditions - x and y wrap around 
+    # so that the simulaton takes place on a toroidal surface.
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
+            total = int((grid[i, (j-1)%width] + grid[i, (j+1)%width] +
+                         grid[(i-1)%width, j] + grid[(i+1)%width, j] +
+                         grid[(i-1)%width, (j-1)%width] + grid[(i-1)%width, (j+1)%width] +
+                         grid[(i+1)%width, (j-1)%width] + grid[(i+1)%width, (j+1)%width])/ON)
+            
+            # apply Conway's rules
+            if grid[i, j]  == ON:
+                if (total < 2) or (total > 3):
+                    tempGrid[i, j] = OFF
+            else:
+                if total == 3:
+                    tempGrid[i, j] = ON
+
 # call main
 if __name__ == '__main__':
-    # pop = population(3, 15, 5)
-    # pop.updatePop(50)
-    # for ind in pop.pool: 
-    #     print(ind.fitness)
-    # print(pop.maxFitness)
-
-    p_count = 15
-    i_width = 50
-    i_init = 6
-    p= population(p_count, i_width, i_init)
+    cuda.select_device(0)
+    p_count = 16   # less than 32
+    i_width = 8 * 3 # multiple of 8, 2 should be optimal unless multidimensional blocks are added
+    i_init = 8
+    lifespan = 100
+    generationCount = 20
+    epochCount = 5
+    p = population(p_count, i_width, i_init)
     fitness_history = [p.fitness(),]
-    for i in range(20):
-        p.update(50)
-        p.evolve()
-        p.save()
-        fitness_history.append(p.fitness())
+    for epoch in range(epochCount):
+        for generation in range(generationCount):
+            p.parallel_update(lifespan)
+            p.evolve()
+            p.save()
+            fitness_history.append(p.fitness())
 
-    for datum in fitness_history:
-       print(datum)
-    # game = individual()
-    # for i in range(5):
-    #     print(game.grid[game.xStart:game.xStart+game.initWidth, game.yStart:game.yStart+game.initWidth])
-    #     game.run()
-    #     game.generateGrid(game, game)
+        # for datum in fitness_history:
+        #    print(datum)
+        p.pool[0].display()
